@@ -42,9 +42,10 @@ fs::path getTask() {
     return task;
 }
 
-bool fileFindSubstring(fs::path filename) {
+
+int fileCountSubstring(fs::path filename) {
     string tmp;
-    bool res = false;
+    int res = 0;
     ifstream f;
     f.open(filename);
     if (!f){
@@ -53,15 +54,16 @@ bool fileFindSubstring(fs::path filename) {
         pthread_spin_unlock(&console_out_spin);
         res = false;
     } else {
-        while(getline(f, tmp) && res == false) {
+        while(getline(f, tmp)) {
             if (tmp.find(search_str) != string::npos) {
-                res = true;
+                res++;
             }
         }
         f.close();
     }
     return res;
 }
+
 
 void* working_thread(void*) {
     char* task;
@@ -78,12 +80,10 @@ void* working_thread(void*) {
             }
             pthread_mutex_unlock(&task_queue_mutex);
         } else {
-            bool res = fileFindSubstring(task);
-            if (res) {
-                pthread_spin_lock(&console_out_spin);
-                cout << task << "\n";
-                pthread_spin_unlock(&console_out_spin);
-            }
+            int substr_count = fileCountSubstring(task);
+            pthread_spin_lock(&console_out_spin);
+            cout << task << " : " << substr_count << " times\n";
+            pthread_spin_unlock(&console_out_spin);
         }
 
         pthread_spin_lock(&active_thread_spin);
