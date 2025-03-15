@@ -12,30 +12,41 @@
 using namespace std;
 namespace fs = filesystem;
 
-char* search_str;
+char* search_str;   // строка, которую будем искать в файлах
 
-queue<fs::path> tasks;
-pthread_mutex_t task_queue_mutex;
-pthread_spinlock_t console_out_spin, active_thread_spin;
-pthread_cond_t task_queue_condvar;
-int active_threads = 0;
-bool stop_work = 0;
+queue<fs::path> tasks;                  // очередь задач (имена файлов)
+pthread_mutex_t task_queue_mutex;       // мьютекс для взаимодействия с этой очередью
+pthread_cond_t task_queue_condvar;      // условная переменная для работы с очередью
+pthread_spinlock_t console_out_spin;    // спинлок для захвата вывода на экран
+pthread_spinlock_t active_thread_spin;  // спинлок для работы с счетчиком "активных" потоков
+int active_threads = 0;                 // счетчик "активных" потоков
+bool stop_work = false;                 // флаг завершения работы
 
 
+/*
+    Функция для взятия задачи потоком из очереди
+*/
 fs::path getTask() {
+    // захватываем доступ к очереди
     pthread_mutex_lock(&task_queue_mutex);
+    // если очередь пуста и при это работа не завершена, 
+    // то встаем в ожидание сигнала условной переменной
     while (tasks.empty() && !stop_work) {
         pthread_cond_wait(&task_queue_condvar, &task_queue_mutex);
     }
 
+    // если, пока мы ждали, работа завершилась, то и мы ничего не делаем с очередью
     if (stop_work) {
         pthread_mutex_unlock(&task_queue_mutex);
         return {};
     }
 
+    // берем задачу
     fs::path task = tasks.front();
     tasks.pop();
+    // возвращаем доступ к очереди
     pthread_mutex_unlock(&task_queue_mutex);
+    // безопасно увеличиваем число "активных" потоков
     pthread_spin_lock(&active_thread_spin);
     active_threads++;
     pthread_spin_unlock(&active_thread_spin);
@@ -43,12 +54,17 @@ fs::path getTask() {
 }
 
 
+/*
+    Функция для подсчета вхождений подстроки в файле
+    Возвращает число вхождений строки в файле filename
+*/
 int fileCountSubstring(fs::path filename) {
     string tmp;
     int res = 0;
     ifstream f;
     f.open(filename);
     if (!f){
+        // безопасно выводим в консоль сообщение о невозможности открытия файла
         pthread_spin_lock(&console_out_spin);
         cout << "Невозможно открыть файл: " << filename << "\n";
         pthread_spin_unlock(&console_out_spin);
@@ -66,26 +82,38 @@ int fileCountSubstring(fs::path filename) {
 
 
 void* working_thread(void*) {
-    char* task;
-    error_code err;
+    char* task;         // текущая задача потока
+    error_code err;     // возникающая ошибка
     while(true) {
         fs::path task = getTask();
         if (task.empty()) {
             break;
         } else if (fs::is_directory(task)) {
+            // если текущий файл - директория, то захватываем доступ к очереди задач
+            // и наполняем ее файлами из этой директории
             pthread_mutex_lock(&task_queue_mutex);
             for (const auto& entry : fs::directory_iterator(task, err)) {
                 tasks.push(entry.path());
+                
+                // посылаем сигналы ожидающим потокам (если такие есть), 
+                // что появились задачи 
                 pthread_cond_signal(&task_queue_condvar);
             }
             pthread_mutex_unlock(&task_queue_mutex);
         } else {
+            // иначе если файл - не директория, то считаем подстроки
             int substr_count = fileCountSubstring(task);
+            // безопасно выводим результат работы
             pthread_spin_lock(&console_out_spin);
             cout << task << " : " << substr_count << " times\n";
             pthread_spin_unlock(&console_out_spin);
         }
 
+        
+        // после выполнения работы над текущей задачей:
+        //  - уменьшаем число активных потоков
+        //  - если при этом задач и других активных потоков нет, то фиксируем 
+        //    конец работы программы (stop_work = 1)
         pthread_spin_lock(&active_thread_spin);
         active_threads--;
         if (tasks.empty() && active_threads == 0) {

@@ -2,50 +2,54 @@
 #include <vector>
 #include <map>
 #include <pthread.h>
-#include <utility>
 #include <list>
 #include <chrono>
 
 using namespace std;
 
+// Размер решаемой задачи (массива целых чисел)
 #define ARR_SIZE (long int)1e6
+// Число проводимых экспериментов
 #define EXP_NUM 20
 
-pthread_mutex_t mapMutex;
-pthread_mutex_t reduceMutex;
+pthread_mutex_t mapMutex;       // мьютекс, используемый в mapThread
+pthread_mutex_t reduceMutex;    // мьютекс, используемый в reduceThread
 
-
+// Структура-аргумент вызова потока mapThread
 struct MapThreadInfo {
-    int* array;     // ссылка на массив
-    int start;      // Индекс первого обрабатываемого в потоке элемента массива
-    int end;        // Индекс элемента, следующего до последнего обрабатываемого элемента
+    int* array;                     // ссылка на обрабатывемый массив
+    int start;                      // Индекс первого обрабатываемого в потоке элемента массива
+    int end;                        // Индекс элемента, следующего до последнего обрабатываемого элемента
 
-    int (*mapFunc)(int);
+    int (*mapFunc)(int);            // Функция map, применяемая к каждому элементу заданной части массива
 
-    map<int, vector<int>>* result;
+    map<int, vector<int>>* result;  // ссылка на map, хранящий результат работы map (соответствие "число i" - "массив значений mapFunc(i)")
 };
 
+// Структура-аргумент вызова потока reduceThread
 struct ReduceThreadData {
-    list<int> keys;
-    map<int, vector<int>>* map_unite;
+    map<int, vector<int>>* map_unite;   // ссылка на объединенный словарь map (слияние результатов mapThread)
+    list<int> keys;                     // список ключей, который обрабатывает текущий поток
 
-    int (*reduceFunc)(vector<int>);
+    int (*reduceFunc)(vector<int>);     // выполняемая reduce-функция 
 
-    map<int, int>* result;
+    map<int, int>* result;              // ссылка на map, хранящий результат работы всех reduce потоков
 };
 
 // Функция Map, выполняемая в потоках
 void* mapThread(void* arg) {
     MapThreadInfo data = *(MapThreadInfo*)arg;
 
-    map<int, vector<int>> local_result;
+    map<int, vector<int>> local_result; // хранит локальный результат работы mapFunc
     
     for (int i = data.start; i != data.end; i++) {
         int elem = data.array[i];
-        local_result[elem].push_back(data.mapFunc(elem));
+        local_result[elem].push_back(data.mapFunc(elem)); // добавляем результат работы mapFunc в local_result
     }
 
+    // захватываем доступ для работы с общим словарем результатов data.result
     pthread_mutex_lock(&mapMutex);
+    // записываем в него всё, что лежит в local_result
     for (auto item : local_result) {
         (*data.result)[item.first].insert(
             (*data.result)[item.first].end(), item.second.begin(), item.second.end()
@@ -60,15 +64,18 @@ void* mapThread(void* arg) {
 void* reduceThread(void* arg) {
     ReduceThreadData data = *(ReduceThreadData*) arg;
 
-    map<int, int> local_result;
+    map<int, int> local_result; // хранит локальный результат работы reduceFunc
 
+    // выполняем reduceFunc для каждого элемента data.map_unite
     for (int key : data.keys) {
         vector<int>& map_unite_elem = (*data.map_unite).at(key);
         int elem = data.reduceFunc(map_unite_elem);
         local_result[key] = elem;        
     }
     
+    // захватываем доступ к словарю data.result
     pthread_mutex_lock(&reduceMutex);
+    // записываем все, что лежит в local_result
     for (auto elem : local_result) {
         (*data.result)[elem.first] = elem.second;
     }
@@ -79,11 +86,13 @@ void* reduceThread(void* arg) {
 
 // Основная функция MapReduce
 void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), int maxThreads) {
-
+    // массив аргументов вызова mapThread
     MapThreadInfo* map_thread_args = new MapThreadInfo[maxThreads];
-
+    
+    // хранит результат работы всех потоков mapThread
     map<int, vector<int>> map_result;
 
+    // разбиваем задачу arr между потоками
     int part_size = ARR_SIZE / maxThreads;
     int part_remain = ARR_SIZE % maxThreads;
     int start = 0;
@@ -97,6 +106,7 @@ void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), i
         start = end;
     }
 
+    // -- создаем потоки map
     pthread_t* threads =  new pthread_t[maxThreads];
 
     for (int i = 0; i < maxThreads; ++i) {
@@ -106,7 +116,7 @@ void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), i
     for (int i = 0; i < maxThreads; ++i) {
         pthread_join(threads[i], nullptr);
     }
-
+    // --
 
     // объединяем результаты Map
     map<int, vector<int>> map_unite;
@@ -116,7 +126,7 @@ void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), i
         );
     }
 
-    // формируем аргументы Reduce
+    // - формируем аргументы Reduce
     ReduceThreadData* reduce_thread_args = new ReduceThreadData[maxThreads];
     int tmp_count = 0;
     for (auto item : map_unite) {
@@ -130,7 +140,9 @@ void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), i
         reduce_thread_args[i].reduceFunc = reduceFunc;
         reduce_thread_args[i].result = &reduce_result;
     }
+    // -
 
+    // создаем потоки reduce
     for (int i = 0; i < maxThreads; i++) {
         pthread_create(&threads[i], NULL, reduceThread, &reduce_thread_args[i]);
     }
@@ -139,7 +151,9 @@ void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), i
         pthread_join(threads[i], NULL);
     }
 
-    // Выводим результаты
+
+    // (закомментировано, т.к. сейчас программа нацелена на измерение времени, а не вывод результата)
+    // Выводим результаты 
     // for (const auto& data : reduce_result) {
     //     cout << data.first << ": " << data.second<< endl;
     // }
@@ -147,12 +161,14 @@ void MapReduce(int arr[], int (*mapFunc)(int), int (*reduceFunc)(vector<int>), i
     delete map_thread_args, threads;
 }
 
-int mapFunc(int arg) {
-    // return 1;
+// Определяем mapFunc
+// Будет подсчитывать число четных чисел
+int myMapFunc(int arg) {
     return arg % 2 == 0 ? 1 : 0;
 }
 
-int reduceFunc(vector<int> data) {
+// определяем reduceFunc
+int myReduceFunc(vector<int> data) {
     int sum = 0;
     if (!data.empty()) {
         for (int i : data) sum += i;
@@ -170,7 +186,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-
+    // создаем случайный массив для работы 
     int* data = new int[ARR_SIZE];
     srand(time(0));
     for (int i = 0; i < ARR_SIZE; i++) {
@@ -181,7 +197,7 @@ int main(int argc, char* argv[]) {
     double time;
     for (int i = 0; i < EXP_NUM; i++) {
         auto t1 = chrono::high_resolution_clock::now();
-        MapReduce(data, mapFunc, reduceFunc, maxThreads);
+        MapReduce(data, myMapFunc, myReduceFunc, maxThreads);
         auto t2 = chrono::high_resolution_clock::now();
         time += chrono::duration<double>(t2 - t1).count();
     }
